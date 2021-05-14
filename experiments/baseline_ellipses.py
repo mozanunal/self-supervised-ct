@@ -29,7 +29,7 @@ iradonmap_reconstructor = get_reference_reconstructor('iradonmap', DATASET)
 learnedgd_reconstructor = get_reference_reconstructor('learnedgd', DATASET)
 learnedpd_reconstructor = get_reference_reconstructor('learnedpd', DATASET)
 
-reconstructors = [fbp_reconstructor, tvadam_reconstructor, fbpunet_reconstructor,  iradonmap_reconstructor,
+reconstructors = [fbp_reconstructor, fbpunet_reconstructor,  iradonmap_reconstructor,
                   learnedgd_reconstructor, learnedpd_reconstructor]
 
 options = {'skip_training': True}
@@ -45,4 +45,4 @@ print(results)
 results.plot_all_reconstructions(fig_size=(9, 4), test_ind=range(3))
 ax = results.plot_performance(PSNR)
 ax.set_ylim([28, 38])
-# plt.show()
+plt.show()

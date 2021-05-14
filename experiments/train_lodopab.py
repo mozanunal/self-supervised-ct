@@ -11,6 +11,8 @@ from dival.reference_reconstructors import (
     check_for_params, download_params, get_hyper_params_path)
 from dival.util.plot import plot_images
 
+from self_supervised_ct.n2self import N2SelfReconstructor
+
 IMPL = 'astra_cuda'
 
 LOG_DIR = './logs/lodopab_n2self'
@@ -26,7 +28,7 @@ dataset = get_standard_dataset('lodopab', impl=IMPL)
 ray_trafo = dataset.get_ray_trafo(impl=IMPL)
 test_data = dataset.get_data_pairs('test', 100)
 
-reconstructor = FBPUNetReconstructor(
+reconstructor = N2SelfReconstructor(
     ray_trafo, log_dir=LOG_DIR,
     save_best_learned_params_path=SAVE_BEST_LEARNED_PARAMS_PATH)
 
@@ -39,8 +41,8 @@ reconstructor.load_hyper_params(hyper_params_path)
 #%% expose FBP cache to reconstructor by assigning `fbp_dataset` attribute
 # uncomment the next line to generate the cache files (~20 GB)
 # generate_fbp_cache_files(dataset, ray_trafo, CACHE_FILES)
-cached_fbp_dataset = get_cached_fbp_dataset(dataset, ray_trafo, CACHE_FILES)
-dataset.fbp_dataset = cached_fbp_dataset
+# cached_fbp_dataset = get_cached_fbp_dataset(dataset, ray_trafo, CACHE_FILES)
+# dataset.fbp_dataset = cached_fbp_dataset
 
 #%% train
 # reduce the batch size here if the model does not fit into GPU memory
