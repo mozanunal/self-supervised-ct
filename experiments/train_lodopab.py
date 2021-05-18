@@ -2,7 +2,7 @@
 Train FBPUNetReconstructor on 'lodopab'.
 """
 import numpy as np
-from dival import get_standard_dataset
+from dival import get_standard_dataset, reconstructors
 from dival.measure import PSNR
 
 from dival.datasets.fbp_dataset import (
@@ -15,14 +15,8 @@ from self_supervised_ct.n2self import N2SelfReconstructor
 
 IMPL = 'astra_cuda'
 
-LOG_DIR = './logs/lodopab_n2self'
-SAVE_BEST_LEARNED_PARAMS_PATH = './params/lodopab_n2self'
-
-CACHE_FILES = {
-    'train':
-        ('./cache_lodopab_train_fbp.npy', None),
-    'validation':
-        ('./cache_lodopab_validation_fbp.npy', None)}
+LOG_DIR = './logs/lodopab_n2self_l1'
+SAVE_BEST_LEARNED_PARAMS_PATH = './params/lodopab_n2self_l1'
 
 dataset = get_standard_dataset('lodopab', impl=IMPL)
 ray_trafo = dataset.get_ray_trafo(impl=IMPL)
@@ -38,15 +32,9 @@ if not check_for_params('fbpunet', 'lodopab', include_learned=False):
 hyper_params_path = get_hyper_params_path('fbpunet', 'lodopab')
 reconstructor.load_hyper_params(hyper_params_path)
 
-#%% expose FBP cache to reconstructor by assigning `fbp_dataset` attribute
-# uncomment the next line to generate the cache files (~20 GB)
-# generate_fbp_cache_files(dataset, ray_trafo, CACHE_FILES)
-# cached_fbp_dataset = get_cached_fbp_dataset(dataset, ray_trafo, CACHE_FILES)
-# dataset.fbp_dataset = cached_fbp_dataset
-
 #%% train
 # reduce the batch size here if the model does not fit into GPU memory
-# reconstructor.batch_size = 16
+reconstructor.batch_size = 32
 reconstructor.train(dataset)
 
 #%% evaluate
@@ -63,6 +51,6 @@ for i in range(3):
     _, ax = plot_images([recos[i], test_data.ground_truth[i]],
                         fig_size=(10, 4))
     ax[0].set_xlabel('PSNR: {:.2f}'.format(psnrs[i]))
-    ax[0].set_title('FBPUNetReconstructor')
+    ax[0].set_title('N2SelfReconstructor')
     ax[1].set_title('ground truth')
     ax[0].figure.suptitle('test sample {:d}'.format(i))

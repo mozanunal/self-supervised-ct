@@ -1,9 +1,12 @@
 
 import os
 from copy import deepcopy
+from math import ceil
 
 import numpy as np
+from tqdm import tqdm
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -13,11 +16,14 @@ else:
     TENSORBOARD_AVAILABLE = True
 from torch.optim.lr_scheduler import CyclicLR, OneCycleLR
 from odl.tomo import fbp_op
+from odl.contrib.torch import OperatorModule
 from dival.reconstructors.standard_learned_reconstructor import (
     StandardLearnedReconstructor)
 from dival.reconstructors.networks.unet import UNet
+from dival.measure import PSNR, SSIM
 
 from .mask import Masker
+from .tool import np_to_torch, torch_to_np
 
 
 
@@ -84,6 +90,12 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
 
     def __init__(self, ray_trafo, **kwargs):
         super().__init__(ray_trafo, **kwargs)
+        self.ray_trafo = ray_trafo
+        self.ray_trafo_module = OperatorModule(self.ray_trafo)
+        self.init_model()
+
+    def _train_one_epoch(self):
+        pass
 
     def train(self, dataset):
         if self.torch_manual_seed:
@@ -102,9 +114,9 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
                                         (1,) + dataset.space[1].shape))
 
         # reset model before training
-        self.init_model()
+        
 
-        criterion = torch.nn.MSELoss()
+        criterion = torch.nn.SmoothL1Loss() #torch.nn.MSELoss()
         self.init_optimizer(dataset_train=dataset_train)
 
         # create PyTorch dataloaders
@@ -152,16 +164,32 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
                     self.model.eval()  # Set model to evaluate mode
 
                 running_psnr = 0.0
+                running_ssim = 0.0
                 running_loss = 0.0
                 running_size = 0
+                num_iter = 0
                 with tqdm(data_loaders[phase],
                           desc='epoch {:d}'.format(epoch + 1),
                           disable=not self.show_pbar) as pbar:
                     for inputs, labels in pbar:
+                        num_iter += 1
                         if self.normalize_by_opnorm:
                             inputs = (1./self.opnorm) * inputs
+
+                        net_input, mask = self.masker.mask( inputs, num_iter % (self.masker.n_masks - 1) )
+                        loss_ratio = torch.numel(mask) / mask.sum()
+                        mask *= loss_ratio
+                        # fbp reconstruct
+                        initial_outputs = np.zeros(labels.shape, dtype=np.float32)
+                        for i in range(len(inputs)):
+                            initial_outputs[i,0,:,:] = self.fbp_op(net_input[i,0].numpy())
+                        initial_outputs = torch.from_numpy(initial_outputs)
+                        
+
+                        initial_outputs = initial_outputs.to(self.device)
                         inputs = inputs.to(self.device)
                         labels = labels.to(self.device)
+                        mask = mask.to(self.device)
 
                         # zero the parameter gradients
                         self._optimizer.zero_grad()
@@ -169,8 +197,10 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
                         # forward
                         # track gradients only if in train phase
                         with torch.set_grad_enabled(phase == 'train'):
-                            outputs = self.model(inputs)
-                            loss = criterion(outputs, labels)
+                            outputs = self.model(initial_outputs)
+                            loss = criterion( 
+                                self.ray_trafo_module(outputs)*mask,
+                                inputs*mask)
 
                             # backward + optimize only if in training phase
                             if phase == 'train':
@@ -186,6 +216,7 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
                             labels_ = labels[i, 0].detach().cpu().numpy()
                             outputs_ = outputs[i, 0].detach().cpu().numpy()
                             running_psnr += PSNR(outputs_, labels_)
+                            running_ssim += SSIM(outputs_, labels_)
 
                         # statistics
                         running_loss += loss.item() * outputs.shape[0]
@@ -193,7 +224,8 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
 
                         pbar.set_postfix({'phase': phase,
                                           'loss': running_loss/running_size,
-                                          'psnr': running_psnr/running_size})
+                                          'psnr': running_psnr/running_size,
+                                          'ssim': running_ssim/running_size})
                         if self.log_dir is not None and phase == 'train':
                             step = (epoch * ceil(dataset_sizes['train']
                                                  / self.batch_size)
@@ -204,6 +236,9 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
                             writer.add_scalar(
                                 'psnr/{}'.format(phase),
                                 torch.tensor(running_psnr/running_size), step)
+                            writer.add_scalar(
+                                'ssim/{}'.format(phase),
+                                torch.tensor(running_ssim/running_size), step) 
 
                     if (self._scheduler is not None
                             and not schedule_every_batch):
@@ -211,6 +246,7 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
 
                     epoch_loss = running_loss / dataset_sizes[phase]
                     epoch_psnr = running_psnr / dataset_sizes[phase]
+                    epoch_ssim = running_ssim / dataset_sizes[phase]
 
                     if self.log_dir is not None and phase == 'validation':
                         step = (epoch+1) * ceil(dataset_sizes['train']
@@ -219,7 +255,8 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
                                           epoch_loss, step)
                         writer.add_scalar('psnr/{}'.format(phase),
                                           epoch_psnr, step)
-
+                        writer.add_scalar('ssim/{}'.format(phase),
+                                          epoch_ssim, step)
                     # deep copy the model (if it is the best one seen so far)
                     if phase == 'validation' and epoch_psnr > best_psnr:
                         best_psnr = epoch_psnr
@@ -257,6 +294,8 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
                           channels=self.channels[:self.scales],
                           skip_channels=[self.skip_channels] * (self.scales),
                           use_sigmoid=self.use_sigmoid)
+        self.masker = Masker(width = 4, mode='interpolate')
+
         if self.init_bias_zero:
             def weights_init(m):
                 if isinstance(m, torch.nn.Conv2d):
