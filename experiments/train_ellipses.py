@@ -32,10 +32,12 @@ if not check_for_params('fbpunet', 'ellipses', include_learned=False):
 hyper_params_path = get_hyper_params_path('fbpunet', 'ellipses')
 reconstructor.load_hyper_params(hyper_params_path)
 print(reconstructor.HYPER_PARAMS)
+# reconstructor.lr = 0.0001
+# reconstructor.HYPER_PARAMS['lr'] = 0.0001
 
 #%% train
 # reduce the batch size here if the model does not fit into GPU memory
-reconstructor.batch_size = 80
+reconstructor.batch_size = 16
 reconstructor.train(dataset)
 
 #%% evaluate

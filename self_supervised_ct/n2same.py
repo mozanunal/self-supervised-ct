@@ -5,6 +5,7 @@ from math import ceil
 
 import time
 import numpy as np
+from torch.nn.functional import mse_loss
 from tqdm import tqdm
 import torch
 import torch.nn as nn
@@ -21,7 +22,6 @@ from odl.contrib.torch import OperatorModule
 from dival.reconstructors.standard_learned_reconstructor import (
     StandardLearnedReconstructor)
 from dival.reconstructors.networks.unet import UNet
-# from .unet import UNet
 from dival.measure import PSNR, SSIM
 
 from .mask import Masker
@@ -44,7 +44,7 @@ def toSubLists(full, ratio):
     return a[0:][::2], a[1:][::2]
 
 
-class N2SelfReconstructor(StandardLearnedReconstructor):
+class N2SameReconstructor(StandardLearnedReconstructor):
     HYPER_PARAMS = deepcopy(StandardLearnedReconstructor.HYPER_PARAMS)
     HYPER_PARAMS.update({
         'scales': {
@@ -119,6 +119,7 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
         
 
         criterion = torch.nn.MSELoss() #torch.nn.MSELoss()
+        criterion_sum = torch.nn.MSELoss(reduction='sum')
         self.init_optimizer(dataset_train=dataset_train)
 
         # create PyTorch dataloaders
@@ -177,17 +178,22 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
                         num_iter += 1
                         if self.normalize_by_opnorm:
                             inputs = (1./self.opnorm) * inputs
-                        net_input, mask = self.masker.mask( inputs, num_iter % (self.masker.n_masks - 1) )
+                        masked_inputs, mask = self.masker.mask( inputs, num_iter % (self.masker.n_masks - 1) )
                         #loss_ratio = torch.numel(mask) / mask.sum()
                         #mask *= loss_ratio
                         # fbp reconstruct
-                        initial_outputs = np.zeros(labels.shape, dtype=np.float32)
+                        masked_inputs_fbp = np.zeros(labels.shape, dtype=np.float32)
                         for i in range(len(inputs)):
-                            initial_outputs[i,0,:,:] = self.fbp_op(net_input[i,0].numpy())
-                        initial_outputs = torch.from_numpy(initial_outputs)
+                            masked_inputs_fbp[i,0,:,:] = self.fbp_op(masked_inputs[i,0].numpy())
+                        masked_inputs_fbp = torch.from_numpy(masked_inputs_fbp)
 
+                        inputs_fbp = np.zeros(labels.shape, dtype=np.float32)
+                        for i in range(len(inputs)):
+                            inputs_fbp[i,0,:,:] = self.fbp_op(inputs[i,0].numpy())
+                        inputs_fbp = torch.from_numpy(inputs_fbp)
 
-                        initial_outputs = initial_outputs.to(self.device)
+                        masked_inputs_fbp = masked_inputs_fbp.to(self.device)
+                        inputs_fbp = inputs_fbp.to(self.device)
                         inputs = inputs.to(self.device)
                         labels = labels.to(self.device)
                         mask = mask.to(self.device)
@@ -198,10 +204,18 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
                         # forward
                         # track gradients only if in train phase
                         with torch.set_grad_enabled(phase == 'train'):
-                            outputs = self.model(initial_outputs)
-                            loss = criterion( 
-                                self.ray_trafo_module(outputs)*mask,
-                                inputs*mask)
+                            out_raw = self.model(inputs_fbp)
+                            out_masked = self.model(masked_inputs_fbp) 
+                            proj_raw = self.ray_trafo_module(out_raw)
+                            proj_masked = self.ray_trafo_module(out_masked)
+                            l_rec = criterion(
+                                proj_raw, inputs
+                                )
+                            l_inv = criterion_sum(
+                                proj_raw*mask, proj_masked*mask
+                                ) / mask.sum()
+                            # print(mask.sum(), l_rec.item(), l_inv.item())
+                            loss = l_rec + 2 * torch.sqrt(l_inv)
 
                             # backward + optimize only if in training phase
                             if phase == 'train':
@@ -213,15 +227,15 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
                                         schedule_every_batch):
                                     self._scheduler.step()
 
-                        for i in range(outputs.shape[0]):
+                        for i in range(out_raw.shape[0]):
                             labels_ = labels[i, 0].detach().cpu().numpy()
-                            outputs_ = outputs[i, 0].detach().cpu().numpy()
+                            outputs_ = out_raw[i, 0].detach().cpu().numpy()
                             running_psnr += PSNR(outputs_, labels_)
                             running_ssim += SSIM(outputs_, labels_)
 
                         # statistics
-                        running_loss += loss.item() * outputs.shape[0]
-                        running_size += outputs.shape[0]
+                        running_loss += loss.item() * out_raw.shape[0]
+                        running_size += out_raw.shape[0]
 
                         pbar.set_postfix({'phase': phase,
                                           'loss': running_loss/running_size,
@@ -291,15 +305,16 @@ class N2SelfReconstructor(StandardLearnedReconstructor):
     def init_model(self):
         self.fbp_op = fbp_op(self.op, filter_type=self.filter_type,
                              frequency_scaling=self.frequency_scaling)
-        self.model = UNet(num_input_channels=1, num_output_channels=1,
-                    feature_scale=4, more_layers=0, concat_x=False,
-                    upsample_mode='bilinear', norm_layer=torch.nn.BatchNorm2d,
-                    pad='reflect',
-                    need_sigmoid=False, need_bias=True).to('cuda')
-                    # UNet(in_ch=1, out_ch=1,
-                    #       channels=self.channels[:self.scales],
-                    #       skip_channels=[self.skip_channels] * (self.scales),
-                    #       use_sigmoid=self.use_sigmoid)
+        self.model = UNet(in_ch=1, out_ch=1,
+                          channels=self.channels[:self.scales],
+                          skip_channels=[self.skip_channels] * (self.scales),
+                          use_sigmoid=self.use_sigmoid)
+                    # UNet(num_input_channels=1, num_output_channels=1,
+                    # feature_scale=4, more_layers=0, concat_x=False,
+                    # upsample_mode='bilinear', norm_layer=torch.nn.BatchNorm2d,
+                    # pad='reflect',
+                    # need_sigmoid=False, need_bias=True).to('cuda')
+
         self.masker = Masker(width = 4, mode='interpolate')
 
         if self.init_bias_zero:

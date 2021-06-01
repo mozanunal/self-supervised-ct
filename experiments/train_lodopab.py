@@ -12,17 +12,18 @@ from dival.reference_reconstructors import (
 from dival.util.plot import plot_images
 
 from self_supervised_ct.n2self import N2SelfReconstructor
+from self_supervised_ct.n2same import N2SameReconstructor
 
 IMPL = 'astra_cuda'
 
-LOG_DIR = './logs/lodopab_n2self_l1'
-SAVE_BEST_LEARNED_PARAMS_PATH = './params/lodopab_n2self_l1'
+LOG_DIR = './logs/lodopab_n2same_astra_cuda'
+SAVE_BEST_LEARNED_PARAMS_PATH = './params/lodopab_n2same_astra_cuda'
 
 dataset = get_standard_dataset('lodopab', impl=IMPL)
 ray_trafo = dataset.get_ray_trafo(impl=IMPL)
 test_data = dataset.get_data_pairs('test', 100)
 
-reconstructor = N2SelfReconstructor(
+reconstructor = N2SameReconstructor(
     ray_trafo, log_dir=LOG_DIR,
     save_best_learned_params_path=SAVE_BEST_LEARNED_PARAMS_PATH)
 
@@ -34,7 +35,8 @@ reconstructor.load_hyper_params(hyper_params_path)
 
 #%% train
 # reduce the batch size here if the model does not fit into GPU memory
-reconstructor.batch_size = 32
+print(reconstructor.HYPER_PARAMS)
+reconstructor.batch_size = 16
 reconstructor.train(dataset)
 
 #%% evaluate
